@@ -1,7 +1,10 @@
 {
-  "practiceArea": "bankruptcy-law",
-  "state": "california",
-  "county": "alameda-county",
+  "startUrls": [
+    {
+      "url": "https://lawyers.findlaw.com/divorce/new-york/albany-county/"
+    }
+  ],
+  "collectDetails": false,
   "results_wanted": 50,
-  "max_pages": 5
+  "max_pages": 10
 }

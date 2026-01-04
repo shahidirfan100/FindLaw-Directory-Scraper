@@ -1,53 +1,31 @@
 {
   "title": "FindLaw Directory Scraper",
-  "description": "Extract lawyer and law firm data from FindLaw.com directory listings. Provide either practice area/state/county OR a direct FindLaw directory URL.",
+  "description": "Extract lawyer and law firm data from FindLaw.com directory listings. Provide one or more direct FindLaw directory URLs.",
   "type": "object",
   "schemaVersion": 1,
   "properties": {
-    "startUrl": {
-      "title": "Start URL",
-      "type": "string",
-      "description": "Direct FindLaw directory URL to scrape (e.g., https://lawyers.findlaw.com/bankruptcy-law/california/alameda-county/). If provided, this overrides practiceArea/state/county fields.",
-      "editor": "textfield",
-      "example": "https://lawyers.findlaw.com/bankruptcy-law/california/alameda-county/"
-    },
-    "practiceArea": {
-      "title": "Practice Area",
-      "type": "string",
-      "description": "Legal practice area slug (e.g., 'bankruptcy-law', 'personal-injury-plaintiff', 'criminal-defense'). Used only if startUrl is not provided.",
-      "editor": "textfield",
-      "prefill": "bankruptcy-law"
-    },
-    "state": {
-      "title": "State",
-      "type": "string",
-      "description": "U.S. state slug (e.g., 'california', 'new-york', 'texas'). Used only if startUrl is not provided.",
-      "editor": "textfield",
-      "prefill": "california"
-    },
-    "county": {
-      "title": "County (optional)",
-      "type": "string",
-      "description": "County slug for more specific searches (e.g., 'alameda-county', 'los-angeles'). Leave empty for state-wide search.",
-      "editor": "textfield"
-    },
-    "city": {
-      "title": "City (optional)",
-      "type": "string",
-      "description": "City slug for highly specific searches (e.g., 'san-francisco', 'new-york'). Leave empty for broader search.",
-      "editor": "textfield"
+    "startUrls": {
+      "title": "Start URLs",
+      "type": "array",
+      "description": "List of FindLaw directory URLs to scrape (e.g., https://lawyers.findlaw.com/bankruptcy-law/california/). Add multiple URLs to scrape different practice areas or locations.",
+      "editor": "requestListSources",
+      "prefill": [
+        {
+          "url": "https://lawyers.findlaw.com/bankruptcy-law/california/alameda-county/"
+        }
+      ]
     },
     "collectDetails": {
       "title": "Collect Detail Page Data",
       "type": "boolean",
-      "description": "If enabled, scraper will visit each lawyer's profile page to extract additional information (bio, team members). This will slow down the scraper but provide richer data.",
+      "description": "If enabled, scraper will visit each lawyer's profile page to extract additional information (bio, team members, practice areas). This provides richer data but takes longer.",
       "editor": "checkbox",
       "default": false
     },
     "results_wanted": {
       "title": "Maximum Results",
       "type": "integer",
-      "description": "Maximum number of lawyer/firm listings to extract. Leave empty to collect all available listings.",
+      "description": "Maximum number of lawyer/firm listings to extract per URL. Leave empty to collect all available listings.",
       "minimum": 1,
       "default": 100,
       "editor": "number"
@@ -55,7 +33,7 @@
     "max_pages": {
       "title": "Maximum Pages",
       "type": "integer",
-      "description": "Safety limit on the number of directory pages to visit. Prevents excessive crawling.",
+      "description": "Safety limit on the number of directory pages to visit per URL. Prevents excessive crawling.",
       "minimum": 1,
       "default": 20,
       "editor": "number"
@@ -73,6 +51,8 @@
       }
     }
   },
-  "required": [],
+  "required": [
+    "startUrls"
+  ],
   "additionalProperties": false
 }

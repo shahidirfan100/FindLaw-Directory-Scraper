@@ -21,19 +21,24 @@ async function main() {
     try {
         const input = (await Actor.getInput()) || {};
         const {
-            practiceArea = '',
-            state = '',
-            county = '',
-            city = '',
+            startUrls = [],
             results_wanted: RESULTS_WANTED_RAW = 100,
             max_pages: MAX_PAGES_RAW = 20,
             collectDetails = false,
-            startUrl,
             proxyConfiguration,
         } = input;
 
         const RESULTS_WANTED = Number.isFinite(+RESULTS_WANTED_RAW) ? Math.max(1, +RESULTS_WANTED_RAW) : Number.MAX_SAFE_INTEGER;
         const MAX_PAGES = Number.isFinite(+MAX_PAGES_RAW) ? Math.max(1, +MAX_PAGES_RAW) : 999;
+
+        // Parse startUrls - handle both array of objects and array of strings
+        const urls = startUrls.map(item => typeof item === 'string' ? item : (item.url || item.requestsFromUrl)).filter(Boolean);
+
+        if (!urls.length) {
+            throw new Error('At least one start URL is required');
+        }
+
+        log.info(`Starting with ${urls.length} URL(s)`);
 
         const toAbs = (href, base = 'https://lawyers.findlaw.com') => {
             try { return new URL(href, base).href; } catch { return null; }
@@ -60,17 +65,6 @@ async function main() {
             const areas = text.split(/\n/).map(l => l.trim()).filter(l => l.length > 0 && l.length < 100);
             return areas.length ? areas.join(', ') : null;
         };
-
-        const buildStartUrl = (practice, st, co, ci) => {
-            if (!practice || !st) throw new Error('practiceArea and state are required');
-            let path = `https://lawyers.findlaw.com/${practice}/${st}/`;
-            if (co) path += `${co}/`;
-            else if (ci) path += `${ci}/`;
-            return path;
-        };
-
-        const initial = startUrl || buildStartUrl(practiceArea, state, county, city);
-        log.info(`Starting: ${initial}`);
 
         const proxyConf = proxyConfiguration ? await Actor.createProxyConfiguration({ ...proxyConfiguration }) : undefined;
 
@@ -341,7 +335,9 @@ async function main() {
             }
         });
 
-        await crawler.run([{ url: initial, userData: { label: 'LIST', pageNo: 1 } }]);
+        // Create initial requests from all start URLs
+        const initialRequests = urls.map(url => ({ url, userData: { label: 'LIST', pageNo: 1 } }));
+        await crawler.run(initialRequests);
 
         // Push remaining pending lawyers
         if (pendingLawyers.length) {
