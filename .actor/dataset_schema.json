@@ -12,6 +12,8 @@
           "rating",
           "reviews",
           "practiceAreas",
+          "bio",
+          "people",
           "profileUrl"
         ]
       },
@@ -40,6 +42,14 @@
           },
           "practiceAreas": {
             "label": "Practice Areas",
+            "format": "text"
+          },
+          "bio": {
+            "label": "Bio/About",
+            "format": "text"
+          },
+          "people": {
+            "label": "Team Members",
             "format": "text"
           },
           "profileUrl": {

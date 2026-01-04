@@ -37,6 +37,7 @@ Create custom legal directories, comparison tools, or referral platforms with up
 | `state` | String | No* | U.S. state slug | `california`, `new-york`, `texas` |
 | `county` | String | No | County slug for narrower searches | `alameda-county`, `los-angeles` |
 | `city` | String | No | City slug for highly specific searches | `san-francisco`, `new-york` |
+| `collectDetails` | Boolean | No | Visit detail pages to extract bio and team members (slower but richer data, default: false) | `true`, `false` |
 | `results_wanted` | Integer | No | Maximum number of listings to extract (default: 100) | `50`, `200`, `1000` |
 | `max_pages` | Integer | No | Safety limit on pages to visit (default: 20) | `5`, `10`, `50` |
 | `proxyConfiguration` | Object | No | Proxy settings (residential recommended) | See Apify proxy docs |
@@ -85,8 +86,10 @@ Each lawyer/firm listing includes the following fields:
   "profileUrl": "https://lawyers.findlaw.com/profile/john-doe-law-firm",
   "latitude": "37.8044",
   "longitude": "-122.2712",
-  "image": "https://example.com/profile-image.jpg",
-  "practiceAreas": ["Bankruptcy", "Debt Relief"]
+  "image": "https://lawyers.findlaw.com/static/c/images/env_prod/type_profile/firmwld_123/pid_1/firm_name.jpg",
+  "practiceAreas": "Bankruptcy, Debt Relief",
+  "bio": "John Doe Law Firm has been serving the Oakland community for over 20 years...",
+  "people": "John Doe, Jane Smith, Robert Johnson"
 }
 ```
 
@@ -100,9 +103,11 @@ Each lawyer/firm listing includes the following fields:
 - **rating** - Average rating (typically 0-5 scale)
 - **reviews** - Total number of reviews
 - **profileUrl** - FindLaw profile page URL
-- **latitude/longitude** - Geographic coordinates (when available)
-- **image** - Profile image URL (when available)
-- **practiceAreas** - Array of practice areas (when available)
+- **latitude/longitude** - Geographic coordinates (from JSON-LD when available)
+- **image** - Profile image URL with proper extension (.jpg)
+- **practiceAreas** - Practice areas as comma-separated string
+- **bio** - Lawyer/firm biography and overview (only if `collectDetails` is enabled)
+- **people** - Team members and attorneys (only if `collectDetails` is enabled)
 
 ## How It Works
 

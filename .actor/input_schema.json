@@ -37,6 +37,13 @@
       "description": "City slug for highly specific searches (e.g., 'san-francisco', 'new-york'). Leave empty for broader search.",
       "editor": "textfield"
     },
+    "collectDetails": {
+      "title": "Collect Detail Page Data",
+      "type": "boolean",
+      "description": "If enabled, scraper will visit each lawyer's profile page to extract additional information (bio, team members). This will slow down the scraper but provide richer data.",
+      "editor": "checkbox",
+      "default": false
+    },
     "results_wanted": {
       "title": "Maximum Results",
       "type": "integer",

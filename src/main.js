@@ -16,6 +16,7 @@ async function main() {
             city = '',
             results_wanted: RESULTS_WANTED_RAW = 100,
             max_pages: MAX_PAGES_RAW = 20,
+            collectDetails = false,
             startUrl,
             proxyConfiguration,
         } = input;
@@ -25,6 +26,13 @@ async function main() {
 
         const toAbs = (href, base = 'https://lawyers.findlaw.com') => {
             try { return new URL(href, base).href; } catch { return null; }
+        };
+
+        // Fix image URLs by appending .jpg if no extension
+        const fixImageUrl = (url) => {
+            if (!url) return null;
+            if (url.match(/\.(jpg|jpeg|png|gif|webp)$/i)) return url;
+            return url + '.jpg';
         };
 
         const buildStartUrl = (practice, st, co, ci) => {
@@ -79,8 +87,10 @@ async function main() {
                                 profileUrl: entity.mainEntityOfPage || entity.url || null,
                                 latitude: geo.latitude || null,
                                 longitude: geo.longitude || null,
-                                image: (entity.image?.url || entity.image) || null,
+                                image: fixImageUrl(entity.image?.url || entity.image),
                                 practiceAreas: entity.areaServed || entity.knowsAbout || null,
+                                bio: null,
+                                people: null,
                             };
 
                             // Format address as single string for display
@@ -122,8 +132,10 @@ async function main() {
                                     profileUrl: entity.mainEntityOfPage || entity.url || null,
                                     latitude: geo.latitude || null,
                                     longitude: geo.longitude || null,
-                                    image: (entity.image?.url || entity.image) || null,
+                                    image: fixImageUrl(entity.image?.url || entity.image),
                                     practiceAreas: entity.areaServed || entity.knowsAbout || null,
+                                    bio: null,
+                                    people: null,
                                 };
 
                                 // Format address as single string for display
@@ -186,12 +198,18 @@ async function main() {
                     if (reviewMatch) reviews = parseInt(reviewMatch[1], 10);
                 }
 
-                // Profile image
-                const image = $card.find('.fl-serp-card-image-link img, .fl-serp-card-image img').first().attr('src') || null;
+                // Profile image - fix URL by adding .jpg extension
+                const imageSrc = $card.find('.fl-serp-card-image-link img, .fl-serp-card-image img').first().attr('src');
+                const image = fixImageUrl(imageSrc);
 
-                // Practice areas (usually in the first span of card text)
-                const practiceText = $card.find('.fl-serp-card-text span').first().text().trim();
-                const practiceAreas = practiceText ? practiceText.replace(/\s*Lawyers?\s*$/i, '').trim() : null;
+                // Practice areas - first span in card text
+                const practiceSpan = $card.find('.fl-serp-card-text span').first();
+                let practiceAreas = null;
+                if (practiceSpan.length) {
+                    const practiceText = practiceSpan.text().trim();
+                    // Remove "Lawyers" or "Lawyer" suffix
+                    practiceAreas = practiceText.replace(/\s*Lawyers?\s*$/i, '').trim() || null;
+                }
 
                 // Address
                 const addressText = $card.find('.fl-serp-card-location-link, .firm_name').text().trim() ||
@@ -212,6 +230,8 @@ async function main() {
                     longitude: null,
                     image,
                     practiceAreas,
+                    bio: null,
+                    people: null,
                 };
 
                 if (name || profileUrl) {
@@ -220,6 +240,47 @@ async function main() {
             });
 
             return lawyers;
+        }
+
+        // Extract detail page data (bio and people)
+        function extractDetailPageData($) {
+            const data = {
+                bio: null,
+                people: null,
+            };
+
+            // Extract bio/about from Overview section
+            const overviewHeading = $('h2#overview, h3#overview').first();
+            if (overviewHeading.length) {
+                const bioParagraphs = [];
+                let nextElement = overviewHeading.next();
+
+                // Collect all paragraphs after the overview heading
+                while (nextElement.length && nextElement.is('p')) {
+                    const text = nextElement.text().trim();
+                    if (text) bioParagraphs.push(text);
+                    nextElement = nextElement.next();
+                }
+
+                if (bioParagraphs.length) {
+                    data.bio = bioParagraphs.join('\n\n');
+                }
+            }
+
+            // Extract people/team members
+            const peopleLinks = $('.profile-profile-body');
+            if (peopleLinks.length) {
+                const people = [];
+                peopleLinks.each((_, link) => {
+                    const name = $(link).text().trim();
+                    if (name) people.push(name);
+                });
+                if (people.length) {
+                    data.people = people.join(', ');
+                }
+            }
+
+            return data;
         }
 
         // Check if pagination should continue
@@ -276,7 +337,40 @@ async function main() {
             maxConcurrency: 10,
             requestHandlerTimeoutSecs: 90,
             async requestHandler({ request, $, enqueueLinks, log: crawlerLog }) {
+                const label = request.userData?.label || 'LIST';
                 const pageNo = request.userData?.pageNo || 1;
+
+                // Handle detail page requests
+                if (label === 'DETAIL') {
+                    const lawyerData = request.userData?.lawyerData;
+                    if (!lawyerData) {
+                        crawlerLog.warning('Detail page request missing lawyer data');
+                        return;
+                    }
+
+                    try {
+                        const detailData = extractDetailPageData($);
+
+                        // Merge detail data with listing data
+                        const enrichedLawyer = {
+                            ...lawyerData,
+                            bio: detailData.bio || lawyerData.bio,
+                            people: detailData.people || lawyerData.people,
+                        };
+
+                        await Dataset.pushData(enrichedLawyer);
+                        saved++;
+                        crawlerLog.info(`Saved lawyer with details: ${enrichedLawyer.name} (Total: ${saved}/${RESULTS_WANTED})`);
+                    } catch (error) {
+                        crawlerLog.error(`Failed to extract detail data: ${error.message}`);
+                        // Save without detail data
+                        await Dataset.pushData(lawyerData);
+                        saved++;
+                    }
+                    return;
+                }
+
+                // Handle listing page requests
                 crawlerLog.info(`Processing page ${pageNo}: ${request.url}`);
 
                 // Try JSON-LD extraction first
@@ -296,9 +390,9 @@ async function main() {
                     return;
                 }
 
-                // Filter out duplicates and save
+                // Filter out duplicates and process
                 const remaining = RESULTS_WANTED - saved;
-                const toSave = [];
+                const toProcess = [];
 
                 for (const lawyer of lawyers) {
                     if (saved >= RESULTS_WANTED) break;
@@ -306,14 +400,32 @@ async function main() {
                     const uniqueKey = lawyer.profileUrl || lawyer.name;
                     if (uniqueKey && !seenUrls.has(uniqueKey)) {
                         seenUrls.add(uniqueKey);
-                        toSave.push(lawyer);
-                        saved++;
+                        toProcess.push(lawyer);
                     }
                 }
 
-                if (toSave.length > 0) {
-                    await Dataset.pushData(toSave);
-                    crawlerLog.info(`Saved ${toSave.length} lawyers (Total: ${saved}/${RESULTS_WANTED})`);
+                // If collectDetails is enabled, enqueue detail pages
+                if (collectDetails && toProcess.length > 0) {
+                    crawlerLog.info(`Enqueueing ${toProcess.length} detail pages`);
+                    for (const lawyer of toProcess) {
+                        if (lawyer.profileUrl) {
+                            await enqueueLinks({
+                                urls: [lawyer.profileUrl],
+                                userData: { label: 'DETAIL', lawyerData: lawyer }
+                            });
+                        } else {
+                            // No profile URL, save directly
+                            await Dataset.pushData(lawyer);
+                            saved++;
+                        }
+                    }
+                } else {
+                    // Save directly without detail pages
+                    if (toProcess.length > 0) {
+                        await Dataset.pushData(toProcess);
+                        saved += toProcess.length;
+                        crawlerLog.info(`Saved ${toProcess.length} lawyers (Total: ${saved}/${RESULTS_WANTED})`);
+                    }
                 }
 
                 // Check if we should continue pagination
@@ -330,7 +442,7 @@ async function main() {
                     crawlerLog.info(`Enqueueing next page: ${nextUrl}`);
                     await enqueueLinks({
                         urls: [nextUrl],
-                        userData: { pageNo: pageNo + 1 }
+                        userData: { label: 'LIST', pageNo: pageNo + 1 }
                     });
                 } else {
                     crawlerLog.info('No valid next page URL found');
@@ -345,7 +457,7 @@ async function main() {
             }
         });
 
-        await crawler.run([{ url: initial, userData: { pageNo: 1 } }]);
+        await crawler.run([{ url: initial, userData: { label: 'LIST', pageNo: 1 } }]);
         log.info(`✓ Scraping completed. Saved ${saved} lawyer listings.`);
     } catch (error) {
         log.error(`Fatal error: ${error.message}`);
