@@ -1,7 +1,17 @@
-// FindLaw Directory Scraper - CheerioCrawler implementation
+// FindLaw Directory Scraper - CheerioCrawler implementation with stealth
 import { Actor, log } from 'apify';
 import { CheerioCrawler, Dataset } from 'crawlee';
-import { load as cheerioLoad } from 'cheerio';
+
+// User-Agent rotation pool
+const USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
+];
+
+const getRandomUserAgent = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 
 // Single-entrypoint main
 await Actor.init();
@@ -45,6 +55,17 @@ async function main() {
                 return urlValue.url || urlValue['@id'] || urlValue.href || null;
             }
             return null;
+        };
+
+        // Clean practice areas text - extract comma-separated list
+        const cleanPracticeAreas = (text) => {
+            if (!text) return null;
+            // Split by newlines and filter out empty lines
+            const areas = text.split(/\n/)
+                .map(line => line.trim())
+                .filter(line => line.length > 0 && line.length < 100);
+            if (areas.length === 0) return null;
+            return areas.join(', ');
         };
 
         const buildStartUrl = (practice, st, co, ci) => {
@@ -258,7 +279,7 @@ async function main() {
             return lawyers;
         }
 
-        // Extract detail page data (bio and people)
+        // Extract detail page data (bio, people, practice areas, rating, reviews)
         function extractDetailPageData($) {
             const data = {
                 bio: null,
@@ -268,13 +289,11 @@ async function main() {
                 reviews: null,
             };
 
-            // Extract practice areas from detail page - use div.block_content_body
-            const practiceAreasContainer = $('div.block_content_body, #profile-tabs__panel--profile-info div.block_content_body').first();
+            // Extract practice areas from detail page - use div.block_content_body and clean
+            const practiceAreasContainer = $('div.block_content_body').first();
             if (practiceAreasContainer.length) {
                 const practiceText = practiceAreasContainer.text().trim();
-                if (practiceText) {
-                    data.practiceAreas = practiceText;
-                }
+                data.practiceAreas = cleanPracticeAreas(practiceText);
             }
 
             // Try JSON-LD for rating/reviews on detail page
@@ -286,23 +305,65 @@ async function main() {
                         data.rating = parsed.aggregateRating.ratingValue || null;
                         data.reviews = parsed.aggregateRating.reviewCount || null;
                     }
+                    // Also check nested structures
+                    if (parsed['@graph']) {
+                        for (const item of parsed['@graph']) {
+                            if (item.aggregateRating) {
+                                data.rating = item.aggregateRating.ratingValue || null;
+                                data.reviews = item.aggregateRating.reviewCount || null;
+                            }
+                        }
+                    }
                 } catch (e) { /* ignore */ }
             }
 
-            // Fallback: extract rating from HTML
+            // Fallback: extract rating/reviews from HTML
             if (!data.rating) {
-                const ratingEl = $('.avvo-rating-badge, .fl-rating-value, [data-testid="rating"]').first();
-                if (ratingEl.length) {
-                    const ratingText = ratingEl.text().trim();
-                    const ratingMatch = ratingText.match(/([\d.]+)/);
-                    if (ratingMatch) data.rating = ratingMatch[1];
+                // Try multiple selectors for rating
+                const ratingSelectors = [
+                    '.fl-profile-rating-value',
+                    '.profile-rating-value',
+                    '[data-testid="rating-value"]',
+                    '.rating-value',
+                    '.fl-rating span',
+                ];
+                for (const sel of ratingSelectors) {
+                    const el = $(sel).first();
+                    if (el.length) {
+                        const text = el.text().trim();
+                        const match = text.match(/([\d.]+)/);
+                        if (match) {
+                            data.rating = match[1];
+                            break;
+                        }
+                    }
                 }
             }
 
-            // Extract bio/about from Overview section - try multiple selectors
+            if (!data.reviews) {
+                // Try multiple selectors for reviews
+                const reviewSelectors = [
+                    '.fl-profile-reviews-count',
+                    '.profile-reviews-count',
+                    '[data-testid="reviews-count"]',
+                    '.reviews-count',
+                ];
+                for (const sel of reviewSelectors) {
+                    const el = $(sel).first();
+                    if (el.length) {
+                        const text = el.text().trim();
+                        const match = text.match(/(\d+)/);
+                        if (match) {
+                            data.reviews = parseInt(match[1], 10);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Extract bio/about from Overview section
             const overviewContainer = $('.overview').first();
             if (overviewContainer.length) {
-                // Get all paragraphs within overview
                 const bioParagraphs = [];
                 overviewContainer.find('p').each((_, p) => {
                     const text = $(p).text().trim();
@@ -397,16 +458,33 @@ async function main() {
 
         const crawler = new CheerioCrawler({
             proxyConfiguration: proxyConf,
-            maxRequestRetries: 2,
+            maxRequestRetries: 3,
             useSessionPool: true,
             persistCookiesPerSession: true,
-            maxConcurrency: 3,
+            maxConcurrency: 5,
             minConcurrency: 1,
-            requestHandlerTimeoutSecs: 90,
-            // Add stealth delays
-            navigationTimeoutSecs: 60,
-            sameDomainDelaySecs: 2,
-            async requestHandler({ request, $, enqueueLinks, log: crawlerLog }) {
+            requestHandlerTimeoutSecs: 60,
+            navigationTimeoutSecs: 30,
+            // Prepare request with random headers
+            preNavigationHooks: [
+                async ({ request }) => {
+                    request.headers = {
+                        ...request.headers,
+                        'User-Agent': getRandomUserAgent(),
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Accept-Encoding': 'gzip, deflate, br',
+                        'Cache-Control': 'no-cache',
+                        'Pragma': 'no-cache',
+                        'Sec-Fetch-Dest': 'document',
+                        'Sec-Fetch-Mode': 'navigate',
+                        'Sec-Fetch-Site': 'none',
+                        'Sec-Fetch-User': '?1',
+                        'Upgrade-Insecure-Requests': '1',
+                    };
+                }
+            ],
+            async requestHandler({ request, $, log: crawlerLog }) {
                 const label = request.userData?.label || 'LIST';
                 const pageNo = request.userData?.pageNo || 1;
 
@@ -552,7 +630,7 @@ async function main() {
                     crawlerLog.info('No valid next page URL found');
                 }
             },
-            async failedRequestHandler({ request }, { log: crawlerLog }) {
+            failedRequestHandler({ request, log: crawlerLog }) {
                 crawlerLog.error(`Request ${request.url} failed after max retries`);
             }
         });
@@ -571,4 +649,3 @@ main().catch(err => {
     console.error(err);
     process.exit(1);
 });
-
