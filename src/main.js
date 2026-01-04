@@ -1,19 +1,20 @@
-// FindLaw Directory Scraper - CheerioCrawler implementation with stealth
+// FindLaw Directory Scraper - Optimized with Apify Stealth Best Practices
 import { Actor, log } from 'apify';
 import { CheerioCrawler, Dataset } from 'crawlee';
 
-// User-Agent rotation pool
+// User-Agent rotation pool - realistic browser strings
 const USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
 ];
 
 const getRandomUserAgent = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+const randomDelay = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
 
-// Single-entrypoint main
 await Actor.init();
 
 async function main() {
@@ -38,7 +39,6 @@ async function main() {
             try { return new URL(href, base).href; } catch { return null; }
         };
 
-        // Fix image URLs by appending .jpg if no extension
         const fixImageUrl = (url) => {
             if (!url) return null;
             if (typeof url === 'object') url = url.url || url['@id'] || null;
@@ -47,31 +47,22 @@ async function main() {
             return url + '.jpg';
         };
 
-        // Extract URL from potential object (JSON-LD often returns objects)
         const extractUrl = (urlValue) => {
             if (!urlValue) return null;
             if (typeof urlValue === 'string') return urlValue;
-            if (typeof urlValue === 'object') {
-                return urlValue.url || urlValue['@id'] || urlValue.href || null;
-            }
+            if (typeof urlValue === 'object') return urlValue.url || urlValue['@id'] || urlValue.href || null;
             return null;
         };
 
-        // Clean practice areas text - extract comma-separated list
+        // Clean practice areas - comma separated
         const cleanPracticeAreas = (text) => {
             if (!text) return null;
-            // Split by newlines and filter out empty lines
-            const areas = text.split(/\n/)
-                .map(line => line.trim())
-                .filter(line => line.length > 0 && line.length < 100);
-            if (areas.length === 0) return null;
-            return areas.join(', ');
+            const areas = text.split(/\n/).map(l => l.trim()).filter(l => l.length > 0 && l.length < 100);
+            return areas.length ? areas.join(', ') : null;
         };
 
         const buildStartUrl = (practice, st, co, ci) => {
-            if (!practice || !st) {
-                throw new Error('practiceArea and state are required when startUrl is not provided');
-            }
+            if (!practice || !st) throw new Error('practiceArea and state are required');
             let path = `https://lawyers.findlaw.com/${practice}/${st}/`;
             if (co) path += `${co}/`;
             else if (ci) path += `${ci}/`;
@@ -79,573 +70,296 @@ async function main() {
         };
 
         const initial = startUrl || buildStartUrl(practiceArea, state, county, city);
-        log.info(`Starting URL: ${initial}`);
+        log.info(`Starting: ${initial}`);
 
         const proxyConf = proxyConfiguration ? await Actor.createProxyConfiguration({ ...proxyConfiguration }) : undefined;
 
         let saved = 0;
         const seenUrls = new Set();
+        const pendingLawyers = []; // Batch for detail pages
 
-        // Extract lawyer data from JSON-LD (primary method)
+        // JSON-LD extraction
         function extractFromJsonLd($) {
-            const scripts = $('script[type="application/ld+json"]');
             const lawyers = [];
-
-            for (let i = 0; i < scripts.length; i++) {
+            $('script[type="application/ld+json"]').each((_, script) => {
                 try {
-                    const parsed = JSON.parse($(scripts[i]).html() || '');
+                    const parsed = JSON.parse($(script).html() || '');
+                    const items = parsed['@type'] === 'CollectionPage' && parsed.mainEntity?.itemListElement
+                        ? parsed.mainEntity.itemListElement
+                        : (parsed['@type'] === 'ItemList' ? parsed.itemListElement : []);
 
-                    // Handle CollectionPage with mainEntity.itemListElement
-                    if (parsed['@type'] === 'CollectionPage' && parsed.mainEntity?.itemListElement) {
-                        for (const item of parsed.mainEntity.itemListElement) {
-                            const entity = item.item || item;
-                            if (!entity) continue;
+                    for (const item of items || []) {
+                        const entity = item.item || item;
+                        if (!entity) continue;
+                        const addr = entity.address || {};
+                        const geo = entity.geo || {};
+                        const rating = entity.aggregateRating || {};
 
-                            const address = entity.address || {};
-                            const geo = entity.geo || {};
-                            const aggregateRating = entity.aggregateRating || {};
-
-                            const lawyer = {
-                                name: entity.name || null,
-                                address: {
-                                    street: address.streetAddress || null,
-                                    city: address.addressLocality || null,
-                                    state: address.addressRegion || null,
-                                    zip: address.postalCode || null,
-                                },
-                                phone: entity.telephone || null,
-                                website: extractUrl(entity.sameAs) || extractUrl(entity.url) || null,
-                                rating: aggregateRating.ratingValue || null,
-                                reviews: aggregateRating.reviewCount || null,
-                                profileUrl: extractUrl(entity.mainEntityOfPage) || extractUrl(entity.url) || null,
-                                latitude: geo.latitude || null,
-                                longitude: geo.longitude || null,
-                                image: fixImageUrl(entity.image?.url || entity.image),
-                                practiceAreas: entity.areaServed || entity.knowsAbout || null,
-                                bio: null,
-                                people: null,
-                            };
-
-                            // Format address as single string for display
-                            const addressParts = [
-                                lawyer.address.street,
-                                lawyer.address.city,
-                                lawyer.address.state,
-                                lawyer.address.zip
-                            ].filter(Boolean);
-                            lawyer.addressFormatted = addressParts.join(', ');
-
-                            lawyers.push(lawyer);
-                        }
+                        lawyers.push({
+                            name: entity.name || null,
+                            address: { street: addr.streetAddress, city: addr.addressLocality, state: addr.addressRegion, zip: addr.postalCode },
+                            addressFormatted: [addr.streetAddress, addr.addressLocality, addr.addressRegion, addr.postalCode].filter(Boolean).join(', '),
+                            phone: entity.telephone || null,
+                            website: extractUrl(entity.sameAs) || extractUrl(entity.url),
+                            rating: rating.ratingValue || null,
+                            reviews: rating.reviewCount || null,
+                            profileUrl: extractUrl(entity.mainEntityOfPage) || extractUrl(entity.url),
+                            latitude: geo.latitude || null,
+                            longitude: geo.longitude || null,
+                            image: fixImageUrl(entity.image?.url || entity.image),
+                            practiceAreas: entity.areaServed || entity.knowsAbout || null,
+                            bio: null,
+                            people: null,
+                        });
                     }
-                    // Handle ItemList containing LegalService entities (alternative structure)
-                    else if (parsed['@type'] === 'ItemList' && Array.isArray(parsed.itemListElement)) {
-                        for (const item of parsed.itemListElement) {
-                            const entity = item.item || item;
-                            if (!entity) continue;
-
-                            const type = entity['@type'];
-                            if (type === 'LegalService' || type === 'Attorney' || type === 'Organization') {
-                                const address = entity.address || {};
-                                const geo = entity.geo || {};
-                                const aggregateRating = entity.aggregateRating || {};
-
-                                const lawyer = {
-                                    name: entity.name || null,
-                                    address: {
-                                        street: address.streetAddress || null,
-                                        city: address.addressLocality || null,
-                                        state: address.addressRegion || null,
-                                        zip: address.postalCode || null,
-                                    },
-                                    phone: entity.telephone || null,
-                                    website: extractUrl(entity.sameAs) || extractUrl(entity.url) || null,
-                                    rating: aggregateRating.ratingValue || null,
-                                    reviews: aggregateRating.reviewCount || null,
-                                    profileUrl: extractUrl(entity.mainEntityOfPage) || extractUrl(entity.url) || null,
-                                    latitude: geo.latitude || null,
-                                    longitude: geo.longitude || null,
-                                    image: fixImageUrl(entity.image?.url || entity.image),
-                                    practiceAreas: entity.areaServed || entity.knowsAbout || null,
-                                    bio: null,
-                                    people: null,
-                                };
-
-                                // Format address as single string for display
-                                const addressParts = [
-                                    lawyer.address.street,
-                                    lawyer.address.city,
-                                    lawyer.address.state,
-                                    lawyer.address.zip
-                                ].filter(Boolean);
-                                lawyer.addressFormatted = addressParts.join(', ');
-
-                                lawyers.push(lawyer);
-                            }
-                        }
-                    }
-                } catch (e) {
-                    // Ignore JSON parsing errors
-                }
-            }
-
+                } catch (e) { }
+            });
             return lawyers;
         }
 
-        // Extract lawyer data from HTML (fallback method)
+        // HTML fallback extraction
         function extractFromHtml($, baseUrl) {
             const lawyers = [];
-            // Use li.fl-serp-card to get the card containers
-            const cards = $('li.fl-serp-card');
-
-            cards.each((_, card) => {
-                const $card = $(card);
-
-                // Name
-                const name = $card.find('.fl-serp-card-title, [data-testid="serp-card-title-link"]').first().text().trim() || null;
-
-                // Profile URL
-                const profileUrl = toAbs(
-                    $card.find('a.directory_profile, .fl-serp-card-title, [data-testid="serp-card-title-link"]').first().attr('href'),
-                    baseUrl
-                );
-
-                // Website
-                const website = toAbs($card.find('a.directory_website').first().attr('href'), baseUrl);
-
-                // Phone
-                const phone = $card.find('a.phone-button').first().text().trim() ||
-                    $card.find('a.phone-button').first().attr('data-phone') || null;
-
-                // Rating and reviews from aria-label or text
-                const reviewLink = $card.find('.fl-serp-card-reviews-link').first();
-                let rating = null;
-                let reviews = null;
-
+            $('li.fl-serp-card').each((_, card) => {
+                const $c = $(card);
+                const name = $c.find('.fl-serp-card-title').first().text().trim() || null;
+                const profileUrl = toAbs($c.find('.fl-serp-card-title, a.directory_profile').first().attr('href'), baseUrl);
+                const phone = $c.find('a.phone-button').first().text().trim() || $c.find('a.phone-button').attr('data-phone') || null;
+                const reviewLink = $c.find('.fl-serp-card-reviews-link').first();
+                let rating = null, reviews = null;
                 if (reviewLink.length) {
                     const ariaLabel = reviewLink.attr('aria-label') || '';
-                    const ratingMatch = ariaLabel.match(/([\d.]+)\s*out of/i);
-                    if (ratingMatch) rating = ratingMatch[1];
-
-                    const reviewText = reviewLink.text().trim();
-                    const reviewMatch = reviewText.match(/\((\d+)\)/);
-                    if (reviewMatch) reviews = parseInt(reviewMatch[1], 10);
+                    const rm = ariaLabel.match(/([\d.]+)\s*out of/i);
+                    if (rm) rating = rm[1];
+                    const rt = reviewLink.text().match(/\((\d+)\)/);
+                    if (rt) reviews = parseInt(rt[1], 10);
                 }
-
-                // Profile image - fix URL by adding .jpg extension
-                const imageSrc = $card.find('.fl-serp-card-image-link img, .fl-serp-card-image img').first().attr('src');
-                const image = fixImageUrl(imageSrc);
-
-                // Practice areas - use p.fl-serp-card-text > span:not(.firm_name)
-                const practiceSpan = $card.find('p.fl-serp-card-text > span:not(.firm_name)').first();
-                let practiceAreas = null;
-                if (practiceSpan.length) {
-                    let practiceText = practiceSpan.text().trim();
-                    // Remove "Lawyers" or "Lawyer" suffix
-                    practiceText = practiceText.replace(/\s*Lawyers?\s*$/i, '').trim();
-                    if (practiceText) {
-                        practiceAreas = practiceText;
-                    }
-                }
-
-                // Address
-                const addressText = $card.find('.fl-serp-card-location-link, .firm_name').text().trim() ||
-                    $card.text().replace(/\s+/g, ' ').trim();
-                const addressMatch = addressText.match(/([^,]+,\s*[A-Z]{2}\s+\d{5})/);
-                const address = addressMatch ? addressMatch[1] : null;
-
-                const lawyer = {
-                    name,
-                    address: address || null,
-                    addressFormatted: address || null,
-                    phone,
-                    website,
-                    rating,
-                    reviews,
-                    profileUrl,
-                    latitude: null,
-                    longitude: null,
-                    image,
-                    practiceAreas,
-                    bio: null,
-                    people: null,
-                };
+                const practiceSpan = $c.find('p.fl-serp-card-text > span:not(.firm_name)').first();
+                let practiceAreas = practiceSpan.text().trim().replace(/\s*Lawyers?\s*$/i, '') || null;
 
                 if (name || profileUrl) {
-                    lawyers.push(lawyer);
+                    lawyers.push({
+                        name, profileUrl, phone, rating, reviews, practiceAreas,
+                        website: toAbs($c.find('a.directory_website').attr('href'), baseUrl),
+                        image: fixImageUrl($c.find('.fl-serp-card-image-link img').attr('src')),
+                        address: null, addressFormatted: null, latitude: null, longitude: null, bio: null, people: null,
+                    });
                 }
             });
-
             return lawyers;
         }
 
-        // Extract detail page data (bio, people, practice areas, rating, reviews)
+        // Detail page extraction
         function extractDetailPageData($) {
-            const data = {
-                bio: null,
-                people: null,
-                practiceAreas: null,
-                rating: null,
-                reviews: null,
-            };
+            const data = { bio: null, people: null, practiceAreas: null, rating: null, reviews: null };
 
-            // Extract practice areas from detail page - use div.block_content_body and clean
-            const practiceAreasContainer = $('div.block_content_body').first();
-            if (practiceAreasContainer.length) {
-                const practiceText = practiceAreasContainer.text().trim();
-                data.practiceAreas = cleanPracticeAreas(practiceText);
-            }
+            // Practice areas
+            const paContainer = $('div.block_content_body').first();
+            if (paContainer.length) data.practiceAreas = cleanPracticeAreas(paContainer.text());
 
-            // Try JSON-LD for rating/reviews on detail page
-            const scripts = $('script[type="application/ld+json"]');
-            for (let i = 0; i < scripts.length; i++) {
+            // Rating/reviews from JSON-LD
+            $('script[type="application/ld+json"]').each((_, script) => {
                 try {
-                    const parsed = JSON.parse($(scripts[i]).html() || '');
-                    if (parsed.aggregateRating) {
-                        data.rating = parsed.aggregateRating.ratingValue || null;
-                        data.reviews = parsed.aggregateRating.reviewCount || null;
+                    const p = JSON.parse($(script).html() || '');
+                    if (p.aggregateRating) {
+                        data.rating = data.rating || p.aggregateRating.ratingValue;
+                        data.reviews = data.reviews || p.aggregateRating.reviewCount;
                     }
-                    // Also check nested structures
-                    if (parsed['@graph']) {
-                        for (const item of parsed['@graph']) {
+                    if (p['@graph']) {
+                        for (const item of p['@graph']) {
                             if (item.aggregateRating) {
-                                data.rating = item.aggregateRating.ratingValue || null;
-                                data.reviews = item.aggregateRating.reviewCount || null;
+                                data.rating = data.rating || item.aggregateRating.ratingValue;
+                                data.reviews = data.reviews || item.aggregateRating.reviewCount;
                             }
                         }
                     }
-                } catch (e) { /* ignore */ }
-            }
+                } catch (e) { }
+            });
 
-            // Fallback: extract rating/reviews from HTML
-            if (!data.rating) {
-                // Try multiple selectors for rating
-                const ratingSelectors = [
-                    '.fl-profile-rating-value',
-                    '.profile-rating-value',
-                    '[data-testid="rating-value"]',
-                    '.rating-value',
-                    '.fl-rating span',
-                ];
-                for (const sel of ratingSelectors) {
-                    const el = $(sel).first();
-                    if (el.length) {
-                        const text = el.text().trim();
-                        const match = text.match(/([\d.]+)/);
-                        if (match) {
-                            data.rating = match[1];
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if (!data.reviews) {
-                // Try multiple selectors for reviews
-                const reviewSelectors = [
-                    '.fl-profile-reviews-count',
-                    '.profile-reviews-count',
-                    '[data-testid="reviews-count"]',
-                    '.reviews-count',
-                ];
-                for (const sel of reviewSelectors) {
-                    const el = $(sel).first();
-                    if (el.length) {
-                        const text = el.text().trim();
-                        const match = text.match(/(\d+)/);
-                        if (match) {
-                            data.reviews = parseInt(match[1], 10);
-                            break;
-                        }
-                    }
-                }
-            }
-
-            // Extract bio/about from Overview section
-            const overviewContainer = $('.overview').first();
-            if (overviewContainer.length) {
-                const bioParagraphs = [];
-                overviewContainer.find('p').each((_, p) => {
-                    const text = $(p).text().trim();
-                    if (text && text !== 'Overview') {
-                        bioParagraphs.push(text);
-                    }
+            // Bio
+            const overview = $('.overview').first();
+            if (overview.length) {
+                const paras = [];
+                overview.find('p').each((_, p) => {
+                    const t = $(p).text().trim();
+                    if (t && t !== 'Overview') paras.push(t);
                 });
-                if (bioParagraphs.length) {
-                    data.bio = bioParagraphs.join('\n\n');
-                }
+                if (paras.length) data.bio = paras.join('\n\n');
             }
 
-            // Fallback: try h3#overview approach
-            if (!data.bio) {
-                const overviewHeading = $('h3#overview, h2#overview').first();
-                if (overviewHeading.length) {
-                    const bioParagraphs = [];
-                    let nextElement = overviewHeading.next();
-                    while (nextElement.length && nextElement.is('p')) {
-                        const text = nextElement.text().trim();
-                        if (text) bioParagraphs.push(text);
-                        nextElement = nextElement.next();
-                    }
-                    if (bioParagraphs.length) {
-                        data.bio = bioParagraphs.join('\n\n');
-                    }
-                }
-            }
-
-            // Extract people/team members
-            const peopleLinks = $('.profile-profile-body');
-            if (peopleLinks.length) {
-                const people = [];
-                peopleLinks.each((_, link) => {
-                    const name = $(link).text().trim();
-                    if (name) people.push(name);
-                });
-                if (people.length) {
-                    data.people = people.join(', ');
-                }
-            }
+            // People
+            const people = [];
+            $('.profile-profile-body').each((_, el) => {
+                const n = $(el).text().trim();
+                if (n) people.push(n);
+            });
+            if (people.length) data.people = people.join(', ');
 
             return data;
         }
 
-        // Check if pagination should continue
-        function shouldContinuePagination($, currentUrl, saved, pageNo) {
-            // Check if we've reached our limits
-            if (saved >= RESULTS_WANTED) {
-                return { shouldContinue: false, reason: 'Reached results_wanted limit' };
-            }
-            if (pageNo >= MAX_PAGES) {
-                return { shouldContinue: false, reason: 'Reached max_pages limit' };
-            }
-
-            // Check for Next button existence
-            const nextButton = $('a[data-testid="fl-pagination-button-next"], .fl-pagination-button[aria-label="Next Page"]');
-            if (nextButton.length === 0) {
-                return { shouldContinue: false, reason: 'No Next button found (end of results)' };
-            }
-
-            // Check results count (e.g., "Results 1 to 20 of 20")
-            const resultsText = $('.fl-pagination-results, [data-testid="fl-pagination-results"]').text().trim();
-            const resultsMatch = resultsText.match(/Results\s+\d+\s+to\s+(\d+)\s+of\s+(\d+)/i);
-            if (resultsMatch) {
-                const currentEnd = parseInt(resultsMatch[1], 10);
-                const total = parseInt(resultsMatch[2], 10);
-                if (currentEnd >= total) {
-                    return { shouldContinue: false, reason: `Reached end of results (${currentEnd} of ${total})` };
-                }
-            }
-
-            return { shouldContinue: true, reason: null };
+        function shouldContinue($, saved, pageNo) {
+            if (saved >= RESULTS_WANTED || pageNo >= MAX_PAGES) return false;
+            const next = $('a[data-testid="fl-pagination-button-next"], .fl-pagination-button[aria-label="Next Page"]');
+            return next.length > 0;
         }
 
-        // Find next page URL
         function findNextPage($, currentUrl) {
-            // Check for Next button with data-testid or aria-label
-            const nextLink = $('a[data-testid="fl-pagination-button-next"], .fl-pagination-button[aria-label="Next Page"]').attr('href');
-            if (nextLink) return toAbs(nextLink, currentUrl);
-
-            // Fallback: look for rel="next"
-            const relNext = $('a[rel="next"]').attr('href');
-            if (relNext) return toAbs(relNext, currentUrl);
-
-            // Manual pagination: increment page number
+            const next = $('a[data-testid="fl-pagination-button-next"]').attr('href') || $('a[rel="next"]').attr('href');
+            if (next) return toAbs(next, currentUrl);
             const url = new URL(currentUrl);
-            const currentPage = parseInt(url.searchParams.get('page') || '1', 10);
-            url.searchParams.set('page', String(currentPage + 1));
+            url.searchParams.set('page', String(parseInt(url.searchParams.get('page') || '1', 10) + 1));
             return url.href;
         }
 
         const crawler = new CheerioCrawler({
             proxyConfiguration: proxyConf,
-            maxRequestRetries: 3,
+            maxRequestRetries: 4,
             useSessionPool: true,
             persistCookiesPerSession: true,
-            maxConcurrency: 5,
-            minConcurrency: 1,
-            requestHandlerTimeoutSecs: 60,
+            sessionPoolOptions: {
+                maxPoolSize: 50,
+                sessionOptions: {
+                    maxUsageCount: 10,
+                },
+            },
+            maxConcurrency: 8,
+            minConcurrency: 2,
+            requestHandlerTimeoutSecs: 45,
             navigationTimeoutSecs: 30,
-            // Prepare request with random headers
+            ignoreSslErrors: true,
+            additionalMimeTypes: ['application/json'],
+            // Stealth headers
             preNavigationHooks: [
-                async ({ request }) => {
+                async ({ request, session }) => {
+                    const ua = getRandomUserAgent();
                     request.headers = {
-                        ...request.headers,
-                        'User-Agent': getRandomUserAgent(),
-                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                        'User-Agent': ua,
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
                         'Accept-Language': 'en-US,en;q=0.9',
                         'Accept-Encoding': 'gzip, deflate, br',
-                        'Cache-Control': 'no-cache',
-                        'Pragma': 'no-cache',
+                        'Connection': 'keep-alive',
+                        'Upgrade-Insecure-Requests': '1',
                         'Sec-Fetch-Dest': 'document',
                         'Sec-Fetch-Mode': 'navigate',
                         'Sec-Fetch-Site': 'none',
                         'Sec-Fetch-User': '?1',
-                        'Upgrade-Insecure-Requests': '1',
+                        'Cache-Control': 'max-age=0',
+                        'DNT': '1',
                     };
+                    // Random delay for human-like behavior
+                    await new Promise(r => setTimeout(r, randomDelay(200, 800)));
                 }
             ],
-            async requestHandler({ request, $, log: crawlerLog }) {
+            async requestHandler({ request, $, log: crawlerLog, session }) {
                 const label = request.userData?.label || 'LIST';
                 const pageNo = request.userData?.pageNo || 1;
 
-                // Handle detail page requests
+                // DETAIL page
                 if (label === 'DETAIL') {
-                    // Check if we've already reached the limit
-                    if (saved >= RESULTS_WANTED) {
-                        crawlerLog.info(`Skipping detail page - already at limit (${saved}/${RESULTS_WANTED})`);
-                        return;
-                    }
-
+                    if (saved >= RESULTS_WANTED) return;
                     const lawyerData = request.userData?.lawyerData;
-                    if (!lawyerData) {
-                        crawlerLog.warning('Detail page request missing lawyer data');
-                        return;
-                    }
+                    if (!lawyerData) return;
 
-                    try {
-                        const detailData = extractDetailPageData($);
+                    const detail = extractDetailPageData($);
+                    const enriched = {
+                        ...lawyerData,
+                        bio: detail.bio || lawyerData.bio,
+                        people: detail.people || lawyerData.people,
+                        practiceAreas: detail.practiceAreas || lawyerData.practiceAreas,
+                        rating: detail.rating || lawyerData.rating,
+                        reviews: detail.reviews || lawyerData.reviews,
+                    };
 
-                        // Merge detail data with listing data (detail page data takes priority if available)
-                        const enrichedLawyer = {
-                            ...lawyerData,
-                            bio: detailData.bio || lawyerData.bio,
-                            people: detailData.people || lawyerData.people,
-                            practiceAreas: detailData.practiceAreas || lawyerData.practiceAreas,
-                            rating: detailData.rating || lawyerData.rating,
-                            reviews: detailData.reviews || lawyerData.reviews,
-                        };
+                    pendingLawyers.push(enriched);
 
-                        await Dataset.pushData(enrichedLawyer);
-                        saved++;
-                        crawlerLog.info(`Saved lawyer with details: ${enrichedLawyer.name} (Total: ${saved}/${RESULTS_WANTED})`);
-                    } catch (error) {
-                        crawlerLog.error(`Failed to extract detail data: ${error.message}`);
-                        // Save listing data as fallback
-                        await Dataset.pushData(lawyerData);
-                        saved++;
+                    // Batch push every 10 or when reaching limit
+                    if (pendingLawyers.length >= 10 || saved + pendingLawyers.length >= RESULTS_WANTED) {
+                        const batch = pendingLawyers.splice(0, RESULTS_WANTED - saved);
+                        if (batch.length) {
+                            await Dataset.pushData(batch);
+                            saved += batch.length;
+                            crawlerLog.info(`Saved batch of ${batch.length} lawyers (Total: ${saved}/${RESULTS_WANTED})`);
+                        }
                     }
                     return;
                 }
 
-                // Handle listing page requests
-                crawlerLog.info(`Processing page ${pageNo}: ${request.url}`);
-
-                // Try JSON-LD extraction first
+                // LIST page
                 let lawyers = extractFromJsonLd($);
+                if (!lawyers.length) lawyers = extractFromHtml($, request.url);
 
-                // Fallback to HTML parsing if JSON-LD fails
-                if (!lawyers || lawyers.length === 0) {
-                    crawlerLog.info('JSON-LD extraction failed, falling back to HTML parsing');
-                    lawyers = extractFromHtml($, request.url);
-                }
-
-                crawlerLog.info(`Found ${lawyers.length} lawyers on page ${pageNo}`);
-
-                // If no lawyers found on this page, stop pagination
-                if (lawyers.length === 0) {
-                    crawlerLog.info('No lawyers found on this page, stopping pagination');
+                if (!lawyers.length) {
+                    crawlerLog.info(`Page ${pageNo}: No lawyers found`);
                     return;
                 }
 
-                // Filter out duplicates and process - only take what we need
-                const remaining = RESULTS_WANTED - saved;
+                const remaining = RESULTS_WANTED - saved - pendingLawyers.length;
                 const toProcess = [];
-
                 for (const lawyer of lawyers) {
                     if (toProcess.length >= remaining) break;
-
-                    const uniqueKey = lawyer.profileUrl || lawyer.name;
-                    if (uniqueKey && !seenUrls.has(uniqueKey)) {
-                        seenUrls.add(uniqueKey);
+                    const key = lawyer.profileUrl || lawyer.name;
+                    if (key && !seenUrls.has(key)) {
+                        seenUrls.add(key);
                         toProcess.push(lawyer);
                     }
                 }
 
-                crawlerLog.info(`Processing ${toProcess.length} lawyers (need ${remaining} more)`);
+                crawlerLog.info(`Page ${pageNo}: Found ${lawyers.length}, processing ${toProcess.length}`);
 
-                // If collectDetails is enabled, enqueue detail pages
-                if (collectDetails && toProcess.length > 0) {
-                    crawlerLog.info(`Enqueueing ${toProcess.length} detail pages`);
-                    const detailRequests = [];
-                    for (const lawyer of toProcess) {
-                        // Ensure profileUrl is a valid string
-                        const profileUrlStr = typeof lawyer.profileUrl === 'string' ? lawyer.profileUrl : extractUrl(lawyer.profileUrl);
-                        if (profileUrlStr && typeof profileUrlStr === 'string') {
-                            // Update lawyer with string profileUrl
-                            lawyer.profileUrl = profileUrlStr;
-                            detailRequests.push({
-                                url: profileUrlStr,
-                                userData: { label: 'DETAIL', lawyerData: lawyer }
-                            });
-                        } else {
-                            // No valid profile URL, save directly without detail fields
-                            const { bio, people, ...lawyerWithoutDetailFields } = lawyer;
-                            await Dataset.pushData(lawyerWithoutDetailFields);
-                            saved++;
+                if (collectDetails && toProcess.length) {
+                    const reqs = toProcess.map(lawyer => {
+                        const url = typeof lawyer.profileUrl === 'string' ? lawyer.profileUrl : extractUrl(lawyer.profileUrl);
+                        if (url) {
+                            lawyer.profileUrl = url;
+                            return { url, userData: { label: 'DETAIL', lawyerData: lawyer } };
                         }
-                    }
-                    if (detailRequests.length > 0) {
-                        await crawler.addRequests(detailRequests);
-                    }
-                } else {
-                    // Save directly without detail pages - remove bio/people fields
-                    if (toProcess.length > 0) {
-                        const lawyersWithoutDetailFields = toProcess.map(lawyer => {
-                            const { bio, people, ...rest } = lawyer;
-                            return rest;
-                        });
-                        await Dataset.pushData(lawyersWithoutDetailFields);
-                        saved += lawyersWithoutDetailFields.length;
-                        crawlerLog.info(`Saved ${lawyersWithoutDetailFields.length} lawyers (Total: ${saved}/${RESULTS_WANTED})`);
-                    }
+                        return null;
+                    }).filter(Boolean);
+
+                    if (reqs.length) await crawler.addRequests(reqs);
+                } else if (toProcess.length) {
+                    // Direct save without details - batch push
+                    const clean = toProcess.map(({ bio, people, ...rest }) => rest);
+                    await Dataset.pushData(clean);
+                    saved += clean.length;
+                    crawlerLog.info(`Saved ${clean.length} lawyers (Total: ${saved}/${RESULTS_WANTED})`);
                 }
 
-                // For collectDetails mode, count enqueued detail pages toward the limit
-                // For non-collectDetails mode, count saved lawyers
+                // Pagination check
                 const effectiveSaved = collectDetails ? seenUrls.size : saved;
+                if (!shouldContinue($, effectiveSaved, pageNo)) return;
+                if (collectDetails && seenUrls.size >= RESULTS_WANTED) return;
 
-                // Check if we should continue pagination
-                const paginationCheck = shouldContinuePagination($, request.url, effectiveSaved, pageNo);
-
-                if (!paginationCheck.shouldContinue) {
-                    crawlerLog.info(`Stopping pagination: ${paginationCheck.reason}`);
-                    return;
-                }
-
-                // Don't enqueue more pages if we already have enough detail pages queued
-                if (collectDetails && seenUrls.size >= RESULTS_WANTED) {
-                    crawlerLog.info(`Stopping pagination: Already enqueued ${seenUrls.size} detail pages`);
-                    return;
-                }
-
-                // Enqueue next page
                 const nextUrl = findNextPage($, request.url);
                 if (nextUrl && nextUrl !== request.url) {
-                    crawlerLog.info(`Enqueueing next page: ${nextUrl}`);
-                    await crawler.addRequests([{
-                        url: nextUrl,
-                        userData: { label: 'LIST', pageNo: pageNo + 1 }
-                    }]);
-                } else {
-                    crawlerLog.info('No valid next page URL found');
+                    await crawler.addRequests([{ url: nextUrl, userData: { label: 'LIST', pageNo: pageNo + 1 } }]);
                 }
             },
             failedRequestHandler({ request, log: crawlerLog }) {
-                crawlerLog.error(`Request ${request.url} failed after max retries`);
+                crawlerLog.warning(`Failed: ${request.url}`);
             }
         });
 
         await crawler.run([{ url: initial, userData: { label: 'LIST', pageNo: 1 } }]);
-        log.info(`✓ Scraping completed. Saved ${saved} lawyer listings.`);
+
+        // Push remaining pending lawyers
+        if (pendingLawyers.length) {
+            const remaining = Math.min(pendingLawyers.length, RESULTS_WANTED - saved);
+            const batch = pendingLawyers.splice(0, remaining);
+            if (batch.length) {
+                await Dataset.pushData(batch);
+                saved += batch.length;
+            }
+        }
+
+        log.info(`✓ Done: ${saved} lawyers saved`);
     } catch (error) {
-        log.error(`Fatal error: ${error.message}`);
+        log.error(`Error: ${error.message}`);
         throw error;
     } finally {
         await Actor.exit();
     }
 }
 
-main().catch(err => {
-    console.error(err);
-    process.exit(1);
-});
+main().catch(err => { console.error(err); process.exit(1); });
