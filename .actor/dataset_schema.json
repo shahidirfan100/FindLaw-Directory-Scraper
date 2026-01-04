@@ -1,0 +1,53 @@
+{
+  "actorSpecification": 1,
+  "fields": {},
+  "views": {
+    "overview": {
+      "title": "Overview",
+      "transformation": {
+        "fields": [
+          "name",
+          "address",
+          "phone",
+          "rating",
+          "reviews",
+          "practiceAreas",
+          "profileUrl"
+        ]
+      },
+      "display": {
+        "component": "table",
+        "properties": {
+          "name": {
+            "label": "Name",
+            "format": "text"
+          },
+          "address": {
+            "label": "Address",
+            "format": "text"
+          },
+          "phone": {
+            "label": "Phone",
+            "format": "text"
+          },
+          "rating": {
+            "label": "Rating",
+            "format": "text"
+          },
+          "reviews": {
+            "label": "Reviews",
+            "format": "number"
+          },
+          "practiceAreas": {
+            "label": "Practice Areas",
+            "format": "text"
+          },
+          "profileUrl": {
+            "label": "Profile URL",
+            "format": "link"
+          }
+        }
+      }
+    }
+  }
+}
