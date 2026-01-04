@@ -263,7 +263,41 @@ async function main() {
             const data = {
                 bio: null,
                 people: null,
+                practiceAreas: null,
+                rating: null,
+                reviews: null,
             };
+
+            // Extract practice areas from detail page - use div.block_content_body
+            const practiceAreasContainer = $('div.block_content_body, #profile-tabs__panel--profile-info div.block_content_body').first();
+            if (practiceAreasContainer.length) {
+                const practiceText = practiceAreasContainer.text().trim();
+                if (practiceText) {
+                    data.practiceAreas = practiceText;
+                }
+            }
+
+            // Try JSON-LD for rating/reviews on detail page
+            const scripts = $('script[type="application/ld+json"]');
+            for (let i = 0; i < scripts.length; i++) {
+                try {
+                    const parsed = JSON.parse($(scripts[i]).html() || '');
+                    if (parsed.aggregateRating) {
+                        data.rating = parsed.aggregateRating.ratingValue || null;
+                        data.reviews = parsed.aggregateRating.reviewCount || null;
+                    }
+                } catch (e) { /* ignore */ }
+            }
+
+            // Fallback: extract rating from HTML
+            if (!data.rating) {
+                const ratingEl = $('.avvo-rating-badge, .fl-rating-value, [data-testid="rating"]').first();
+                if (ratingEl.length) {
+                    const ratingText = ratingEl.text().trim();
+                    const ratingMatch = ratingText.match(/([\d.]+)/);
+                    if (ratingMatch) data.rating = ratingMatch[1];
+                }
+            }
 
             // Extract bio/about from Overview section - try multiple selectors
             const overviewContainer = $('.overview').first();
@@ -363,16 +397,27 @@ async function main() {
 
         const crawler = new CheerioCrawler({
             proxyConfiguration: proxyConf,
-            maxRequestRetries: 3,
+            maxRequestRetries: 2,
             useSessionPool: true,
-            maxConcurrency: 10,
+            persistCookiesPerSession: true,
+            maxConcurrency: 3,
+            minConcurrency: 1,
             requestHandlerTimeoutSecs: 90,
+            // Add stealth delays
+            navigationTimeoutSecs: 60,
+            sameDomainDelaySecs: 2,
             async requestHandler({ request, $, enqueueLinks, log: crawlerLog }) {
                 const label = request.userData?.label || 'LIST';
                 const pageNo = request.userData?.pageNo || 1;
 
                 // Handle detail page requests
                 if (label === 'DETAIL') {
+                    // Check if we've already reached the limit
+                    if (saved >= RESULTS_WANTED) {
+                        crawlerLog.info(`Skipping detail page - already at limit (${saved}/${RESULTS_WANTED})`);
+                        return;
+                    }
+
                     const lawyerData = request.userData?.lawyerData;
                     if (!lawyerData) {
                         crawlerLog.warning('Detail page request missing lawyer data');
@@ -382,11 +427,14 @@ async function main() {
                     try {
                         const detailData = extractDetailPageData($);
 
-                        // Merge detail data with listing data
+                        // Merge detail data with listing data (detail page data takes priority if available)
                         const enrichedLawyer = {
                             ...lawyerData,
                             bio: detailData.bio || lawyerData.bio,
                             people: detailData.people || lawyerData.people,
+                            practiceAreas: detailData.practiceAreas || lawyerData.practiceAreas,
+                            rating: detailData.rating || lawyerData.rating,
+                            reviews: detailData.reviews || lawyerData.reviews,
                         };
 
                         await Dataset.pushData(enrichedLawyer);
@@ -394,7 +442,7 @@ async function main() {
                         crawlerLog.info(`Saved lawyer with details: ${enrichedLawyer.name} (Total: ${saved}/${RESULTS_WANTED})`);
                     } catch (error) {
                         crawlerLog.error(`Failed to extract detail data: ${error.message}`);
-                        // Save without detail data
+                        // Save listing data as fallback
                         await Dataset.pushData(lawyerData);
                         saved++;
                     }
@@ -421,12 +469,12 @@ async function main() {
                     return;
                 }
 
-                // Filter out duplicates and process
+                // Filter out duplicates and process - only take what we need
                 const remaining = RESULTS_WANTED - saved;
                 const toProcess = [];
 
                 for (const lawyer of lawyers) {
-                    if (saved >= RESULTS_WANTED) break;
+                    if (toProcess.length >= remaining) break;
 
                     const uniqueKey = lawyer.profileUrl || lawyer.name;
                     if (uniqueKey && !seenUrls.has(uniqueKey)) {
@@ -434,6 +482,8 @@ async function main() {
                         toProcess.push(lawyer);
                     }
                 }
+
+                crawlerLog.info(`Processing ${toProcess.length} lawyers (need ${remaining} more)`);
 
                 // If collectDetails is enabled, enqueue detail pages
                 if (collectDetails && toProcess.length > 0) {
@@ -472,11 +522,21 @@ async function main() {
                     }
                 }
 
+                // For collectDetails mode, count enqueued detail pages toward the limit
+                // For non-collectDetails mode, count saved lawyers
+                const effectiveSaved = collectDetails ? seenUrls.size : saved;
+
                 // Check if we should continue pagination
-                const paginationCheck = shouldContinuePagination($, request.url, saved, pageNo);
+                const paginationCheck = shouldContinuePagination($, request.url, effectiveSaved, pageNo);
 
                 if (!paginationCheck.shouldContinue) {
                     crawlerLog.info(`Stopping pagination: ${paginationCheck.reason}`);
+                    return;
+                }
+
+                // Don't enqueue more pages if we already have enough detail pages queued
+                if (collectDetails && seenUrls.size >= RESULTS_WANTED) {
+                    crawlerLog.info(`Stopping pagination: Already enqueued ${seenUrls.size} detail pages`);
                     return;
                 }
 
@@ -511,3 +571,4 @@ main().catch(err => {
     console.error(err);
     process.exit(1);
 });
+
