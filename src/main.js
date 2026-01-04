@@ -162,7 +162,8 @@ async function main() {
         // Extract lawyer data from HTML (fallback method)
         function extractFromHtml($, baseUrl) {
             const lawyers = [];
-            const cards = $('.fl-serp-card');
+            // Use li.fl-serp-card to get the card containers
+            const cards = $('li.fl-serp-card');
 
             cards.each((_, card) => {
                 const $card = $(card);
@@ -202,13 +203,16 @@ async function main() {
                 const imageSrc = $card.find('.fl-serp-card-image-link img, .fl-serp-card-image img').first().attr('src');
                 const image = fixImageUrl(imageSrc);
 
-                // Practice areas - first span in card text
-                const practiceSpan = $card.find('.fl-serp-card-text span').first();
+                // Practice areas - first span in .fl-serp-card-text
+                const practiceSpan = $card.find('.fl-serp-card-text > span:first-child, .fl-serp-card-text span:not(.firm_name)').first();
                 let practiceAreas = null;
                 if (practiceSpan.length) {
-                    const practiceText = practiceSpan.text().trim();
+                    let practiceText = practiceSpan.text().trim();
                     // Remove "Lawyers" or "Lawyer" suffix
-                    practiceAreas = practiceText.replace(/\s*Lawyers?\s*$/i, '').trim() || null;
+                    practiceText = practiceText.replace(/\s*Lawyers?\s*$/i, '').trim();
+                    if (practiceText) {
+                        practiceAreas = practiceText;
+                    }
                 }
 
                 // Address
@@ -249,21 +253,36 @@ async function main() {
                 people: null,
             };
 
-            // Extract bio/about from Overview section
-            const overviewHeading = $('h2#overview, h3#overview').first();
-            if (overviewHeading.length) {
+            // Extract bio/about from Overview section - try multiple selectors
+            const overviewContainer = $('.overview').first();
+            if (overviewContainer.length) {
+                // Get all paragraphs within overview
                 const bioParagraphs = [];
-                let nextElement = overviewHeading.next();
-
-                // Collect all paragraphs after the overview heading
-                while (nextElement.length && nextElement.is('p')) {
-                    const text = nextElement.text().trim();
-                    if (text) bioParagraphs.push(text);
-                    nextElement = nextElement.next();
-                }
-
+                overviewContainer.find('p').each((_, p) => {
+                    const text = $(p).text().trim();
+                    if (text && text !== 'Overview') {
+                        bioParagraphs.push(text);
+                    }
+                });
                 if (bioParagraphs.length) {
                     data.bio = bioParagraphs.join('\n\n');
+                }
+            }
+
+            // Fallback: try h3#overview approach
+            if (!data.bio) {
+                const overviewHeading = $('h3#overview, h2#overview').first();
+                if (overviewHeading.length) {
+                    const bioParagraphs = [];
+                    let nextElement = overviewHeading.next();
+                    while (nextElement.length && nextElement.is('p')) {
+                        const text = nextElement.text().trim();
+                        if (text) bioParagraphs.push(text);
+                        nextElement = nextElement.next();
+                    }
+                    if (bioParagraphs.length) {
+                        data.bio = bioParagraphs.join('\n\n');
+                    }
                 }
             }
 
@@ -407,10 +426,11 @@ async function main() {
                 // If collectDetails is enabled, enqueue detail pages
                 if (collectDetails && toProcess.length > 0) {
                     crawlerLog.info(`Enqueueing ${toProcess.length} detail pages`);
+                    const detailRequests = [];
                     for (const lawyer of toProcess) {
                         if (lawyer.profileUrl) {
-                            await enqueueLinks({
-                                urls: [lawyer.profileUrl],
+                            detailRequests.push({
+                                url: lawyer.profileUrl,
                                 userData: { label: 'DETAIL', lawyerData: lawyer }
                             });
                         } else {
@@ -419,12 +439,19 @@ async function main() {
                             saved++;
                         }
                     }
+                    if (detailRequests.length > 0) {
+                        await crawler.addRequests(detailRequests);
+                    }
                 } else {
-                    // Save directly without detail pages
+                    // Save directly without detail pages - remove bio/people fields
                     if (toProcess.length > 0) {
-                        await Dataset.pushData(toProcess);
-                        saved += toProcess.length;
-                        crawlerLog.info(`Saved ${toProcess.length} lawyers (Total: ${saved}/${RESULTS_WANTED})`);
+                        const lawyersWithoutDetailFields = toProcess.map(lawyer => {
+                            const { bio, people, ...rest } = lawyer;
+                            return rest;
+                        });
+                        await Dataset.pushData(lawyersWithoutDetailFields);
+                        saved += lawyersWithoutDetailFields.length;
+                        crawlerLog.info(`Saved ${lawyersWithoutDetailFields.length} lawyers (Total: ${saved}/${RESULTS_WANTED})`);
                     }
                 }
 
@@ -440,20 +467,16 @@ async function main() {
                 const nextUrl = findNextPage($, request.url);
                 if (nextUrl && nextUrl !== request.url) {
                     crawlerLog.info(`Enqueueing next page: ${nextUrl}`);
-                    await enqueueLinks({
-                        urls: [nextUrl],
+                    await crawler.addRequests([{
+                        url: nextUrl,
                         userData: { label: 'LIST', pageNo: pageNo + 1 }
-                    });
+                    }]);
                 } else {
                     crawlerLog.info('No valid next page URL found');
                 }
             },
-            async failedRequestHandler({ request, error }, context) {
-                context.log.error(`Request ${request.url} failed: ${error.message}`);
-                // Don't retry on 403 errors (blocking)
-                if (error.message.includes('403')) {
-                    context.log.warning('Received 403 error, stopping retries for this request');
-                }
+            async failedRequestHandler({ request }, { log: crawlerLog }) {
+                crawlerLog.error(`Request ${request.url} failed after max retries`);
             }
         });
 
