@@ -31,8 +31,20 @@ async function main() {
         // Fix image URLs by appending .jpg if no extension
         const fixImageUrl = (url) => {
             if (!url) return null;
+            if (typeof url === 'object') url = url.url || url['@id'] || null;
+            if (!url || typeof url !== 'string') return null;
             if (url.match(/\.(jpg|jpeg|png|gif|webp)$/i)) return url;
             return url + '.jpg';
+        };
+
+        // Extract URL from potential object (JSON-LD often returns objects)
+        const extractUrl = (urlValue) => {
+            if (!urlValue) return null;
+            if (typeof urlValue === 'string') return urlValue;
+            if (typeof urlValue === 'object') {
+                return urlValue.url || urlValue['@id'] || urlValue.href || null;
+            }
+            return null;
         };
 
         const buildStartUrl = (practice, st, co, ci) => {
@@ -81,10 +93,10 @@ async function main() {
                                     zip: address.postalCode || null,
                                 },
                                 phone: entity.telephone || null,
-                                website: entity.sameAs || entity.url || null,
+                                website: extractUrl(entity.sameAs) || extractUrl(entity.url) || null,
                                 rating: aggregateRating.ratingValue || null,
                                 reviews: aggregateRating.reviewCount || null,
-                                profileUrl: entity.mainEntityOfPage || entity.url || null,
+                                profileUrl: extractUrl(entity.mainEntityOfPage) || extractUrl(entity.url) || null,
                                 latitude: geo.latitude || null,
                                 longitude: geo.longitude || null,
                                 image: fixImageUrl(entity.image?.url || entity.image),
@@ -126,10 +138,10 @@ async function main() {
                                         zip: address.postalCode || null,
                                     },
                                     phone: entity.telephone || null,
-                                    website: entity.sameAs || entity.url || null,
+                                    website: extractUrl(entity.sameAs) || extractUrl(entity.url) || null,
                                     rating: aggregateRating.ratingValue || null,
                                     reviews: aggregateRating.reviewCount || null,
-                                    profileUrl: entity.mainEntityOfPage || entity.url || null,
+                                    profileUrl: extractUrl(entity.mainEntityOfPage) || extractUrl(entity.url) || null,
                                     latitude: geo.latitude || null,
                                     longitude: geo.longitude || null,
                                     image: fixImageUrl(entity.image?.url || entity.image),
@@ -203,8 +215,8 @@ async function main() {
                 const imageSrc = $card.find('.fl-serp-card-image-link img, .fl-serp-card-image img').first().attr('src');
                 const image = fixImageUrl(imageSrc);
 
-                // Practice areas - first span in .fl-serp-card-text
-                const practiceSpan = $card.find('.fl-serp-card-text > span:first-child, .fl-serp-card-text span:not(.firm_name)').first();
+                // Practice areas - use p.fl-serp-card-text > span:not(.firm_name)
+                const practiceSpan = $card.find('p.fl-serp-card-text > span:not(.firm_name)').first();
                 let practiceAreas = null;
                 if (practiceSpan.length) {
                     let practiceText = practiceSpan.text().trim();
@@ -428,14 +440,19 @@ async function main() {
                     crawlerLog.info(`Enqueueing ${toProcess.length} detail pages`);
                     const detailRequests = [];
                     for (const lawyer of toProcess) {
-                        if (lawyer.profileUrl) {
+                        // Ensure profileUrl is a valid string
+                        const profileUrlStr = typeof lawyer.profileUrl === 'string' ? lawyer.profileUrl : extractUrl(lawyer.profileUrl);
+                        if (profileUrlStr && typeof profileUrlStr === 'string') {
+                            // Update lawyer with string profileUrl
+                            lawyer.profileUrl = profileUrlStr;
                             detailRequests.push({
-                                url: lawyer.profileUrl,
+                                url: profileUrlStr,
                                 userData: { label: 'DETAIL', lawyerData: lawyer }
                             });
                         } else {
-                            // No profile URL, save directly
-                            await Dataset.pushData(lawyer);
+                            // No valid profile URL, save directly without detail fields
+                            const { bio, people, ...lawyerWithoutDetailFields } = lawyer;
+                            await Dataset.pushData(lawyerWithoutDetailFields);
                             saved++;
                         }
                     }
